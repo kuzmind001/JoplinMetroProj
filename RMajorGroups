@@ -1,63 +1,94 @@
 library(tidyverse)
-library(zoo)  # For optional interpolation
+library(zoo)
 
-# Set the folder where all the CSVs are stored
+# Folder containing all yearly CSV files
 folder_path <- "fulldata/"
 csv_files <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
 
-# Function to load and prepare a single year's file
+# Function to process each file
 process_yearly_file <- function(file_path) {
-  # Extract the year from the file name (e.g., "2023" from "msa2023.csv")
-  year <- str_extract(file_path, "\\d{4}")
+  year <- str_extract(file_path, "\\d{4}") %>% as.integer()
   
-  df <- read_csv(file_path, show_col_types = FALSE) %>%
-    # Standardize all column names to lowercase
+  df <- suppressWarnings(read_csv(file_path, show_col_types = FALSE)) %>%
     rename_with(tolower)
-  
-  # Handle different naming conventions for occupation group column
+
   if ("o_group" %in% names(df)) {
     df <- df %>% rename(occ_group = o_group)
-  } else if ("occ_group" %in% names(df)) {
-    # Already correctly named, but for clarity
-    df <- df %>% rename(occ_group = occ_group)
-  } else {
-    stop(paste("Missing expected occupational group column in file:", file_path))
+  } else if ("group" %in% names(df)) {
+    df <- df %>% rename(occ_group = group)
   }
-  
-  # Filter to major groups in Joplin metro area only
-  df %>%
-    filter(occ_group == "major", area == "27900") %>%
+
+  if ("occ_title" %in% names(df)) {
+    df <- df %>% rename(occupation_title = occ_title)
+  }
+
+  required_cols <- c("area", "occ_group", "occupation_title", "a_median", "tot_emp", "occ_code")
+  missing_cols <- setdiff(required_cols, names(df))
+  if (length(missing_cols) > 0) {
+    warning(paste("Missing columns in file:", file_path, "-", paste(missing_cols, collapse = ", ")))
+    return(tibble())
+  }
+
+  df <- df %>%
+    mutate(
+      occ_group = tolower(occ_group),
+      occupation_title = tolower(occupation_title),
+      area = tolower(as.character(area))
+    )
+
+  joplin_code <- ifelse(year <= 2004, "3710", "27900")
+
+  df_clean <- df %>%
+    filter(occ_group == "major", area == joplin_code) %>%
     select(
-      OccupationalGroup = occ_title,
-      A_MEDIAN = a_median,
-      TOT_EMP = tot_emp
+      occ_code,
+      occupational_group = occupation_title,
+      a_median,
+      tot_emp
     ) %>%
     mutate(
-      MedianAnnualWage = ifelse(A_MEDIAN == "**", NA, parse_number(A_MEDIAN)),
-      TotalEmployment = ifelse(TOT_EMP == "**", NA, parse_number(TOT_EMP)),
-      Year = as.integer(year)
+      missing_wage = str_detect(a_median, "^\\*+$"),
+      missing_employment = str_detect(tot_emp, "^\\*+$"),
+      median_annual_wage = suppressWarnings(
+        ifelse(missing_wage, NA, parse_number(a_median))
+      ),
+      total_employment = suppressWarnings(
+        ifelse(missing_employment, NA, parse_number(tot_emp))
+      ),
+      year = year
     ) %>%
-    select(OccupationalGroup, MedianAnnualWage, TotalEmployment, Year)
+    select(
+      occ_code,
+      occupational_group,
+      median_annual_wage,
+      total_employment,
+      year,
+      missing_wage,
+      missing_employment
+    )
+
+  return(df_clean)
 }
 
-# Process and combine all years into one data frame
+# Combine all files
 all_years_raw <- map_dfr(csv_files, process_yearly_file)
 
-# (Interpolation remains optional and commented out)
-# interpolated_data <- all_years_raw %>%
-#   group_by(OccupationalGroup) %>%
-#   arrange(Year) %>%
-#   mutate(
-#     MedianAnnualWage = na.approx(MedianAnnualWage, x = Year, na.rm = FALSE),
-#     TotalEmployment = na.approx(TotalEmployment, x = Year, na.rm = FALSE)
-#   ) %>%
-#   ungroup()
-
-# Final calculation using raw (uninterpolated) data
-data_with_na <- all_years_raw %>%
+# Interpolate missing values by occupation and year
+interpolated_data <- all_years_raw %>%
+  group_by(occ_code) %>%
+  arrange(year) %>%
   mutate(
-    TotalLaborIncome = MedianAnnualWage * TotalEmployment
-  )
+    interpolated_wage = is.na(median_annual_wage),
+    interpolated_employment = is.na(total_employment),
+    median_annual_wage = na.approx(median_annual_wage, year, na.rm = FALSE),
+    total_employment = na.approx(total_employment, year, na.rm = FALSE)
+  ) %>%
+  ungroup() %>%
+  mutate(total_labor_income = median_annual_wage * total_employment)
+
+# Export interpolated data to Tableau
+write_csv(interpolated_data, "joplin_major_groups_2000_2024_interpolated.csv")
+
 
 # Write to CSV for Tableau import
 write_csv(data_with_na, "joplin_major_groups_raw_with_na_2000_2024.csv")
