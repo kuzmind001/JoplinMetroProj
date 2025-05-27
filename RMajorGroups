@@ -1,0 +1,63 @@
+library(tidyverse)
+library(zoo)  # For optional interpolation
+
+# Set the folder where all the CSVs are stored
+folder_path <- "fulldata/"
+csv_files <- list.files(folder_path, pattern = "\\.csv$", full.names = TRUE)
+
+# Function to load and prepare a single year's file
+process_yearly_file <- function(file_path) {
+  # Extract the year from the file name (e.g., "2023" from "msa2023.csv")
+  year <- str_extract(file_path, "\\d{4}")
+  
+  df <- read_csv(file_path, show_col_types = FALSE) %>%
+    # Standardize all column names to lowercase
+    rename_with(tolower)
+  
+  # Handle different naming conventions for occupation group column
+  if ("o_group" %in% names(df)) {
+    df <- df %>% rename(occ_group = o_group)
+  } else if ("occ_group" %in% names(df)) {
+    # Already correctly named, but for clarity
+    df <- df %>% rename(occ_group = occ_group)
+  } else {
+    stop(paste("Missing expected occupational group column in file:", file_path))
+  }
+  
+  # Filter to major groups in Joplin metro area only
+  df %>%
+    filter(occ_group == "major", area == "27900") %>%
+    select(
+      OccupationalGroup = occ_title,
+      A_MEDIAN = a_median,
+      TOT_EMP = tot_emp
+    ) %>%
+    mutate(
+      MedianAnnualWage = ifelse(A_MEDIAN == "**", NA, parse_number(A_MEDIAN)),
+      TotalEmployment = ifelse(TOT_EMP == "**", NA, parse_number(TOT_EMP)),
+      Year = as.integer(year)
+    ) %>%
+    select(OccupationalGroup, MedianAnnualWage, TotalEmployment, Year)
+}
+
+# Process and combine all years into one data frame
+all_years_raw <- map_dfr(csv_files, process_yearly_file)
+
+# (Interpolation remains optional and commented out)
+# interpolated_data <- all_years_raw %>%
+#   group_by(OccupationalGroup) %>%
+#   arrange(Year) %>%
+#   mutate(
+#     MedianAnnualWage = na.approx(MedianAnnualWage, x = Year, na.rm = FALSE),
+#     TotalEmployment = na.approx(TotalEmployment, x = Year, na.rm = FALSE)
+#   ) %>%
+#   ungroup()
+
+# Final calculation using raw (uninterpolated) data
+data_with_na <- all_years_raw %>%
+  mutate(
+    TotalLaborIncome = MedianAnnualWage * TotalEmployment
+  )
+
+# Write to CSV for Tableau import
+write_csv(data_with_na, "joplin_major_groups_raw_with_na_2000_2024.csv")
